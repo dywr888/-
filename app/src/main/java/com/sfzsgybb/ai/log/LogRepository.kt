@@ -31,9 +31,17 @@ class LogRepository(private val dao: LogRecordDao) {
 
     suspend fun byId(id: Long): LogRecord? = dao.byId(id)?.toModel()
 
+    /**
+     * 游标分页。
+     *
+     * 【过滤必须下推到 SQL】
+     * 之前先取 limit 条再在内存里 filter：请求 101 条过滤后可能只剩 3 条，
+     * 而 hasMore 按过滤后的条数算 —— 明明还有数据却显示「没有更多」，
+     * 或者一页只出来两三条、触底反复加载。
+     * 现在过滤条件写进 WHERE，limit 就是这一页真正的条数。
+     */
     suspend fun page(packageName: String?, group: Int, afterTime: Long, afterId: Long, limit: Int): List<LogRecord> =
-        dao.pageBefore(afterTime, afterId, limit).map { it.toModel() }
-            .filter { (packageName == null || it.packageName == packageName) && (group < 0 || it.group == group) }
+        dao.pageBeforeFiltered(packageName, group, afterTime, afterId, limit).map { it.toModel() }
 
     suspend fun search(query: String, limit: Int, offset: Int): List<LogRecord> =
         dao.search(query, limit, offset).map { it.toModel() }
