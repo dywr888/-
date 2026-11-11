@@ -306,6 +306,17 @@ data class LogListUiState(
     val groupCounts: Map<Int, Int> = emptyMap(),
     /** 一次性操作提示（清空日志等），UI 显示后调 consumeMessage() 清空 */
     val message: String? = null,
+    /**
+     * 攒着还没插进列表的新日志。
+     *
+     * 用户没滚到顶部时不直接插入 —— 那会把正在看的内容顶下去。
+     * 等用户点「↑ N 条新日志」气泡时再合并进 [logs]。
+     */
+    val pendingNew: List<LogRecord> = emptyList(),
+    /** 是否暂停了自动刷新（想仔细看某条日志时用）。 */
+    val autoRefreshPaused: Boolean = false,
+    /** 搜索结果是否被截断（超过上限只显示前 N 条）。 */
+    val searchTruncated: Boolean = false,
 ) {
     /** 按搜索词过滤后的应用列表。 */
     val filteredApps: List<LogAppOption>
@@ -407,6 +418,8 @@ class LogListViewModel @Inject constructor(
         autoRefreshJob = viewModelScope.launch {
             while (isActive) {
                 delay(intervalMs)
+                // 用户手动暂停时跳过这一轮（想细看某条日志时用）
+                if (_state.value.autoRefreshPaused) continue
                 // 搜索状态和分页加载中不打扰。
                 // loading 为真说明用户刚点了刷新/换了应用，正在查；
                 // 这时候再插一脚会和那次查询抢着写 state，两边结果互相覆盖。
@@ -478,11 +491,35 @@ class LogListViewModel @Inject constructor(
         // 直接覆盖会把搜索结果冲掉，所以这里再确认一次状态没变。
         if (_state.value.query.isNotBlank()) return false
 
+        // 【不直接插进列表】
+        // 之前是 `fresh + s.logs` 把新日志顶到最前面。LazyColumn 保持的是
+        // index 而不是视觉锚点，所以用户滚到第 200 行细看时，
+        // 顶部一插入整屏内容就往下跳 —— 想对着某条日志研究时非常难受。
+        //
+        // 现在新日志先攒在 pendingNew 里，列表不动，
+        // 只弹一个「↑ N 条新日志」气泡，用户点了才追加并滚到顶部。
         _state.value = s.copy(
-            logs = fresh + s.logs,
-            total = logRepository.count(s.packageFilter),
+            pendingNew = fresh + s.pendingNew,
+            total = s.total,
         )
-        return true
+        return false
+    }
+
+    /** 用户点「有新日志」气泡：把攒下的新日志插到列表顶部。 */
+    fun flushPendingNew() {
+        val s = _state.value
+        if (s.pendingNew.isEmpty()) return
+        _state.value = s.copy(
+            logs = s.pendingNew + s.logs,
+            pendingNew = emptyList(),
+        )
+    }
+
+    /** 丢弃攒下的新日志（切换筛选条件时调用，避免混进旧筛选结果）。 */
+    private fun dropPendingNew() {
+        if (_state.value.pendingNew.isNotEmpty()) {
+            _state.value = _state.value.copy(pendingNew = emptyList())
+        }
     }
 
     fun refresh() {
@@ -509,6 +546,7 @@ class LogListViewModel @Inject constructor(
      */
     fun setPackageFilter(pkg: String?) {
         if (_state.value.packageFilter == pkg) return
+        dropPendingNew()
         searchJob?.cancel()
         _state.value = _state.value.copy(
             packageFilter = pkg,
@@ -611,10 +649,15 @@ class LogListViewModel @Inject constructor(
                 // 清空搜索：回到正常分页列表
                 refresh()
             } else {
-                val rows = logRepository.search(q, pageSize, 0)
+                // 多取一条用来判断「是否还有更多」
+                val rows = logRepository.search(q, pageSize + 1, 0)
                 if (gen != loadGeneration) return@launch
+                val truncated = rows.size > pageSize
                 _state.value = _state.value.copy(
-                    loading = false, logs = rows, hasMore = false,
+                    loading = false,
+                    logs = if (truncated) rows.take(pageSize) else rows,
+                    hasMore = false,
+                    searchTruncated = truncated,
                     total = logRepository.count(_state.value.packageFilter),
                 )
             }
@@ -622,6 +665,8 @@ class LogListViewModel @Inject constructor(
     }
 
     fun setGroup(g: Int) {
+        // 切分组时把攒着的新日志丢掉，避免混进旧筛选结果
+        dropPendingNew()
         _state.value = _state.value.copy(groupFilter = g)
         refresh()
     }
@@ -629,6 +674,7 @@ class LogListViewModel @Inject constructor(
 
     /** 按应用筛选：null = 全部。 */
     fun setPackage(pkg: String?) {
+        dropPendingNew()
         _state.value = _state.value.copy(packageFilter = pkg)
         refresh()
     }
@@ -697,6 +743,21 @@ class LogListViewModel @Inject constructor(
     /** UI 显示完提示后调用，避免重复弹出。 */
     fun consumeMessage() {
         _state.value = _state.value.copy(message = null)
+    }
+
+    /**
+     * 暂停 / 恢复自动刷新。
+     *
+     * 想对着某条日志琢磨时，自动刷新一直在动很干扰。
+     * 暂停后新日志仍会攒着（pendingNew），恢复时一起放出来，
+     * 不会漏掉任何一条。
+     */
+    fun toggleAutoRefresh() {
+        val paused = !_state.value.autoRefreshPaused
+        _state.value = _state.value.copy(autoRefreshPaused = paused)
+        _state.value = _state.value.copy(
+            message = if (paused) "已暂停刷新，点右上角 ▶ 恢复" else "已恢复刷新",
+        )
     }
 
     fun clear() {

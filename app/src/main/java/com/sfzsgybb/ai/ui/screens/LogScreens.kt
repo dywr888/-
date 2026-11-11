@@ -79,6 +79,11 @@ import com.sfzsgybb.ai.ui.theme.Sem
 import com.sfzsgybb.ai.ui.components.cardOutline
 import com.sfzsgybb.ai.ui.components.AppIconByPackage
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.FloatingActionButtonDefaults
 
 /**
  * 日志页。
@@ -419,6 +424,7 @@ private fun AppLogDetail(
     vm: LogListViewModel,
 ) {
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     val appLabel = state.appOptions.firstOrNull {
         it.packageName == state.packageFilter
     }?.label ?: state.packageFilter.orEmpty()
@@ -439,12 +445,28 @@ private fun AppLogDetail(
             title = appLabel,
             onBack = onBack,
             actions = {
+                // 【计数语义】
+                // 之前一直显示 state.total（该应用的全部条数），
+                // 搜索出 5 条时右上角还挂着 38421，看着很困惑。
+                // 现在筛选/搜索状态下显示「当前结果 / 总数」。
+                val filtering = state.query.isNotBlank() || state.groupFilter >= 0
                 Text(
-                    state.total.toString(),
+                    if (filtering) "${state.logs.size} / ${state.total}"
+                    else state.total.toString(),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (filtering) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(end = 4.dp),
                 )
+                // 暂停 / 恢复自动刷新：想细看某条日志时用
+                IconButton(onClick = { vm.toggleAutoRefresh() }) {
+                    Icon(
+                        if (state.autoRefreshPaused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                        contentDescription = if (state.autoRefreshPaused) "恢复刷新" else "暂停刷新",
+                        tint = if (state.autoRefreshPaused) Sem.warning
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 IconButton(onClick = onRefresh) { Icon(Icons.Filled.Refresh, "刷新") }
                 // 清空该应用的日志
                 IconButton(onClick = onClearCurrent) {
@@ -516,6 +538,7 @@ private fun AppLogDetail(
                 },
             )
         } else {
+            Box(Modifier.fillMaxSize()) {
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(top = 6.dp, bottom = 12.dp),
@@ -539,6 +562,46 @@ private fun AppLogDetail(
                         )
                     }
                 }
+                // 【搜索截断提示】
+                // 搜索结果有上限，超过就只显示前 N 条。之前什么都不提示，
+                // 用户会以为「搜到的就这么多」，其实后面还有。
+                if (state.searchTruncated) {
+                    item {
+                        Text(
+                            "结果较多，仅显示前 ${state.logs.size} 条。请细化关键词查看更精确的结果。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Sem.warning,
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        )
+                    }
+                }
+            }
+
+            // 【新日志气泡】
+            // 新日志不再直接插进列表（那会把用户正在看的内容顶下去），
+            // 而是攒起来，这里显示「↑ N 条新日志」，点了才插入并滚到顶部。
+            if (state.pendingNew.isNotEmpty()) {
+                SmallFloatingActionButton(
+                    onClick = {
+                        vm.flushPendingNew()
+                        scope.launch { listState.animateScrollToItem(0) }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 12.dp),
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(Icons.Filled.ArrowUpward, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("${state.pendingNew.size} 条新日志", fontSize = 12.sp)
+                    }
+                }
+            }
             }
         }
     }

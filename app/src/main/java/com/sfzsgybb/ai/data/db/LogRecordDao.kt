@@ -196,6 +196,40 @@ interface LogRecordDao {
     )
     suspend fun logIdsByPackageWithHttp(packageName: String?): List<Long>
 
+
+    /**
+     * 带包名/分组过滤的分页查询。
+     *
+     * 【为什么必须下推到 SQL】
+     * 之前是「先取 limit 条、再在内存里 filter」，结果：
+     *  - 请求 101 条，过滤后可能只剩 3 条
+     *  - hasMore 却按过滤后的条数算 → 明明还有数据却显示「没有更多」
+     *  - 一页只出两三条，触底反复加载
+     * 过滤条件写进 WHERE 后，limit 才是「这一页真正的条数」。
+     *
+     * 索引 (packageName, group) 已存在，下推后能真正吃到。
+     */
+    @Query(
+        """
+        SELECT id, packageName, logName, objName, className, `group`, type, callStack,
+        payloadBrief, payloadCrc, resultBrief, resultCrc,
+        size, time, isRead, algoName, keyType, paramDesc, resultKind
+        FROM log_record
+        WHERE ((:afterTime = 9223372036854775807) OR (time < :afterTime) OR (time = :afterTime AND id < :afterId))
+          AND (:packageName IS NULL OR packageName = :packageName)
+          AND (:group < 0 OR `group` = :group)
+        ORDER BY time DESC, id DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun pageBeforeFiltered(
+        packageName: String?,
+        group: Int,
+        afterTime: Long,
+        afterId: Long,
+        limit: Int,
+    ): List<LogRecordSummaryEntity>
+
 }
 
 data class GroupCount(val g: Int, val c: Int)
